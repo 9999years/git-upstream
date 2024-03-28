@@ -1,8 +1,20 @@
+use std::cmp::Ordering;
 use std::process::Command;
 
 use clap::Parser;
 use command_error::CommandExt;
+use command_error::OutputContext;
+use miette::miette;
 use miette::IntoDiagnostic;
+use owo_colors::OwoColorize;
+use owo_colors::Style;
+use utf8_command::Utf8Output;
+
+mod format_bulleted_list;
+mod install_tracing;
+
+use format_bulleted_list::format_bulleted_list;
+use install_tracing::install_tracing;
 
 /// A shortcut for `git push --set-upstream REMOTE BRANCH`.
 #[derive(Debug, Clone, Parser)]
@@ -32,57 +44,105 @@ pub struct Opts {
     remote: Option<String>,
 }
 
+impl Opts {
+    fn branch(&self) -> miette::Result<String> {
+        Ok(match &self.branch {
+            Some(branch) => branch.to_owned(),
+            None => Command::new("git")
+                .args(["rev-parse", "--abbrev-ref", "HEAD"])
+                .output_checked_utf8()
+                .into_diagnostic()?
+                .stdout
+                .trim()
+                .to_owned(),
+        })
+    }
+
+    fn remotes(&self) -> miette::Result<Vec<String>> {
+        let mut remotes = Command::new("git")
+            .args(["remote"])
+            .output_checked_as(|context: OutputContext<Utf8Output>| {
+                if !context.status().success() {
+                    Err(context.error())
+                } else {
+                    let remotes = context
+                        .output()
+                        .stdout
+                        .lines()
+                        .map(|line| line.trim().to_owned())
+                        .collect::<Vec<_>>();
+                    if remotes.is_empty() {
+                        Err(context.error_msg("No Git remotes found"))
+                    } else {
+                        Ok(remotes)
+                    }
+                }
+            })
+            .into_diagnostic()?;
+
+        remotes.sort_by(|a, _b| {
+            if a == "origin" {
+                Ordering::Less
+            } else {
+                Ordering::Equal
+            }
+        });
+
+        if let Some(remote) = &self.remote {
+            remotes.sort_by(|a, _b| {
+                if a == remote {
+                    Ordering::Less
+                } else {
+                    Ordering::Equal
+                }
+            });
+
+            if !remotes.contains(remote) {
+                return Err(miette!(
+                    "Remote {remote:?} not found. Available Git remotes:\n{}",
+                    format_bulleted_list(remotes)
+                ));
+            }
+        }
+
+        Ok(remotes)
+    }
+}
+
 fn main() -> miette::Result<()> {
     let opts = Opts::parse();
     install_tracing(&opts.log)?;
 
-    let branch = match opts.branch {
-        Some(branch) => branch,
-        None => Command::new("git")
-            .args(["rev-parse", "--abbrev-ref", "HEAD"])
-            .output_checked_utf8()
-            .into_diagnostic()?
-            .stdout
-            .trim()
-            .to_owned(),
-    };
+    let branch = opts.branch()?;
+    let remotes = opts.remotes()?;
 
-    let mut remotes = Vec::new();
-    if let Some(remote) = opts.remote {
-        remotes.push(remote)
+    for remote in &remotes {
+        tracing::info!(
+            "{}",
+            format!("$ git push --set-upstream {branch} {remote}").if_supports_color(
+                owo_colors::Stream::Stderr,
+                |text| Style::new().bold().underline().style(text)
+            )
+        );
+
+        let result = Command::new("git")
+            .args(["push", "--set-upstream", &remote, &branch])
+            .status_checked();
+
+        match result {
+            Ok(_) => {
+                return Ok(());
+            }
+            Err(err) => {
+                if opts.fail_fast {
+                    return Err(err).into_diagnostic();
+                }
+            }
+        }
     }
 
-    remotes.extend(
-        Command::new("git")
-            .args(["remote"])
-            .output_checked_utf8()
-            .into_diagnostic()?
-            .stdout
-            .lines()
-            .map(|line| line.trim().to_owned()),
-    );
-
-    for remote in remotes {
-        tracing::info!("$ git push --set-upstream {branch} {remote}");
-    }
-
-    Ok(())
-}
-
-fn install_tracing(filter_directives: &str) -> miette::Result<()> {
-    use tracing_subscriber::layer::SubscriberExt;
-    use tracing_subscriber::util::SubscriberInitExt;
-    use tracing_subscriber::Layer;
-
-    let env_filter = tracing_subscriber::EnvFilter::try_new(filter_directives).into_diagnostic()?;
-
-    let human_layer = tracing_human_layer::HumanLayer::new()
-        .with_output_writer(std::io::stderr())
-        .with_filter(env_filter);
-
-    let registry = tracing_subscriber::registry();
-
-    registry.with(human_layer).init();
-
-    Ok(())
+    Err(miette!(
+        "Failed to push to all remotes:\n{}",
+        format_bulleted_list(&remotes)
+    ))
 }
