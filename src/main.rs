@@ -98,10 +98,17 @@ impl Opts {
             });
 
             if !remotes.contains(remote) {
-                return Err(miette!(
+                let message = format!(
                     "Remote {remote:?} not found. Available Git remotes:\n{}",
-                    format_bulleted_list(remotes)
-                ));
+                    format_bulleted_list(&remotes)
+                );
+                if self.fail_fast {
+                    // If we only want to try one remote, this is a hard error.
+                    return Err(miette!("{message}"));
+                } else {
+                    // Otherwise, we can try other remotes, so we'll just warn.
+                    tracing::warn!("{message}");
+                }
             }
         }
 
