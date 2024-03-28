@@ -1,0 +1,15 @@
+[package]
+name = "git-upstream"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+clap = { version = "4.5.4", features = ["derive", "wrap_help", "env"] }
+command-error = "0.4.0"
+miette = { version = "7.2.0", default-features = false, features = ["fancy-no-backtrace"] }
+tracing = { version = "0.1.40", features = ["attributes"] }
+tracing-human-layer = "0.1.3"
+tracing-subscriber = { version = "0.3.18", features = ["env-filter", "registry"] }
+utf8-command = "1.0.1"
