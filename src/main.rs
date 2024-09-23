@@ -1,26 +1,154 @@
-use std::cmp::Ordering;
+use std::collections::BTreeSet;
 use std::process::Command;
 
 use clap::Parser;
 use command_error::CommandExt;
 use command_error::OutputContext;
+use fs_err as fs;
 use miette::miette;
+use miette::Context;
 use miette::IntoDiagnostic;
 use owo_colors::OwoColorize;
 use owo_colors::Style;
+use serde::Deserialize;
 use utf8_command::Utf8Output;
 
-mod format_bulleted_list;
 mod install_tracing;
 
-use format_bulleted_list::format_bulleted_list;
 use install_tracing::install_tracing;
+use xdg::BaseDirectories;
+
+/// Configuration, both from the command-line and a user configuration file.
+pub struct Config {
+    /// User directories.
+    pub dirs: BaseDirectories,
+    /// User configuration file.
+    pub file: ConfigFile,
+    /// Command-line options.
+    pub cli: Cli,
+}
+
+impl Config {
+    pub fn new() -> miette::Result<Self> {
+        let dirs = BaseDirectories::with_prefix("git-upstream").into_diagnostic()?;
+        let file = {
+            let path = dirs.get_config_file("config.toml");
+            if !path.exists() {
+                ConfigFile::default()
+            } else {
+                toml::from_str(
+                    &fs::read_to_string(path)
+                        .into_diagnostic()
+                        .wrap_err("Failed to read configuration file")?,
+                )
+                .into_diagnostic()
+                .wrap_err("Failed to deserialize configuration file")?
+            }
+        };
+        let cli = Cli::parse();
+        Ok(Self { dirs, file, cli })
+    }
+
+    /// Get the remote names to push to, if they exist, highest preferences first.
+    pub fn remote_preferences(&self) -> Vec<String> {
+        let mut ret = Vec::new();
+
+        if let Some(remote) = &self.cli.remote {
+            ret.push(remote.clone());
+        }
+
+        if !self.file.remotes.is_empty() {
+            ret.extend(self.file.remotes.iter().cloned());
+        } else {
+            ret.push("origin".into());
+        }
+
+        ret
+    }
+
+    pub fn list_remotes(&self) -> miette::Result<BTreeSet<String>> {
+        Command::new("git")
+            .args(["remote"])
+            .output_checked_as(|context: OutputContext<Utf8Output>| {
+                if !context.status().success() {
+                    Err(context.error())
+                } else {
+                    let remotes = context
+                        .output()
+                        .stdout
+                        .lines()
+                        .map(|line| line.trim().to_owned())
+                        .collect::<BTreeSet<_>>();
+                    if remotes.is_empty() {
+                        Err(context.error_msg("No Git remotes found"))
+                    } else {
+                        Ok(remotes)
+                    }
+                }
+            })
+            .into_diagnostic()
+    }
+
+    pub fn branch(&self) -> miette::Result<String> {
+        Ok(match &self.cli.branch {
+            Some(branch) => branch.to_owned(),
+            None => Command::new("git")
+                .args(["rev-parse", "--abbrev-ref", "HEAD"])
+                .output_checked_utf8()
+                .into_diagnostic()?
+                .stdout
+                .trim()
+                .to_owned(),
+        })
+    }
+
+    /// Try to push to the given remote.
+    ///
+    /// If successful, returns `true`.
+    pub fn try_push(&self, branch: &str, remote: &str) -> miette::Result<bool> {
+        tracing::info!(
+            "{}",
+            format!("$ git push --set-upstream {branch} {remote}").if_supports_color(
+                owo_colors::Stream::Stderr,
+                |text| Style::new().bold().underline().style(text)
+            )
+        );
+
+        let result = Command::new("git")
+            .args(["push", "--set-upstream", remote, branch])
+            .status_checked();
+
+        match result {
+            Ok(_) => Ok(true),
+            Err(err) => {
+                if self.cli.fail_fast {
+                    Err(err).into_diagnostic()
+                } else {
+                    tracing::debug!(%remote, "Failed to push to Git remote");
+                    Ok(false)
+                }
+            }
+        }
+    }
+}
+
+/// Configuration file format.
+///
+/// TODO: Default configuration file for documentation.
+///
+/// TODO: Add `fail-fast`/`on-failure` behavior.
+#[derive(Deserialize, Default)]
+pub struct ConfigFile {
+    /// Remotes to attempt to push to, in order.
+    #[serde(default)]
+    remotes: Vec<String>,
+}
 
 /// A shortcut for `git push --set-upstream REMOTE BRANCH`.
 #[derive(Debug, Clone, Parser)]
 #[command(version, author, about)]
 #[command(max_term_width = 100, disable_help_subcommand = true)]
-pub struct Opts {
+pub struct Cli {
     /// Log filter directives, of the form `target[span{field=value}]=level`, where all components
     /// except the level are optional.
     ///
@@ -39,117 +167,38 @@ pub struct Opts {
     #[arg(long)]
     branch: Option<String>,
 
-    /// The remote to push to first. Defaults to `origin` if it exists.
+    /// The remote to push to first. Defaults to `origin` if it exists and no `remotes` are
+    /// set in the configuration file.
     #[arg(env = "GIT_UPSTREAM_REMOTE")]
     remote: Option<String>,
 }
 
-impl Opts {
-    fn branch(&self) -> miette::Result<String> {
-        Ok(match &self.branch {
-            Some(branch) => branch.to_owned(),
-            None => Command::new("git")
-                .args(["rev-parse", "--abbrev-ref", "HEAD"])
-                .output_checked_utf8()
-                .into_diagnostic()?
-                .stdout
-                .trim()
-                .to_owned(),
-        })
-    }
-
-    fn remotes(&self) -> miette::Result<Vec<String>> {
-        let mut remotes = Command::new("git")
-            .args(["remote"])
-            .output_checked_as(|context: OutputContext<Utf8Output>| {
-                if !context.status().success() {
-                    Err(context.error())
-                } else {
-                    let remotes = context
-                        .output()
-                        .stdout
-                        .lines()
-                        .map(|line| line.trim().to_owned())
-                        .collect::<Vec<_>>();
-                    if remotes.is_empty() {
-                        Err(context.error_msg("No Git remotes found"))
-                    } else {
-                        Ok(remotes)
-                    }
-                }
-            })
-            .into_diagnostic()?;
-
-        remotes.sort_by(|a, _b| {
-            if a == "origin" {
-                Ordering::Less
-            } else {
-                Ordering::Equal
-            }
-        });
-
-        if let Some(remote) = &self.remote {
-            remotes.sort_by(|a, _b| {
-                if a == remote {
-                    Ordering::Less
-                } else {
-                    Ordering::Equal
-                }
-            });
-
-            if !remotes.contains(remote) {
-                let message = format!(
-                    "Remote {remote:?} not found. Available Git remotes:\n{}",
-                    format_bulleted_list(&remotes)
-                );
-                if self.fail_fast {
-                    // If we only want to try one remote, this is a hard error.
-                    return Err(miette!("{message}"));
-                } else {
-                    // Otherwise, we can try other remotes, so we'll just warn.
-                    tracing::warn!("{message}");
-                }
-            }
-        }
-
-        Ok(remotes)
-    }
-}
-
 fn main() -> miette::Result<()> {
-    let opts = Opts::parse();
-    install_tracing(&opts.log)?;
+    let config = Config::new()?;
+    install_tracing(&config.cli.log)?;
 
-    let branch = opts.branch()?;
-    let remotes = opts.remotes()?;
+    let branch = config.branch()?;
+    let remote_preferences = config.remote_preferences();
+    let mut remotes = config.list_remotes()?;
 
-    for remote in &remotes {
-        tracing::info!(
-            "{}",
-            format!("$ git push --set-upstream {branch} {remote}").if_supports_color(
-                owo_colors::Stream::Stderr,
-                |text| Style::new().bold().underline().style(text)
-            )
-        );
+    for remote in remote_preferences {
+        if !remotes.remove(&remote) {
+            tracing::debug!(%remote, "Git remote not found");
+            continue;
+        }
 
-        let result = Command::new("git")
-            .args(["push", "--set-upstream", &remote, &branch])
-            .status_checked();
-
-        match result {
-            Ok(_) => {
-                return Ok(());
-            }
-            Err(err) => {
-                if opts.fail_fast {
-                    return Err(err).into_diagnostic();
-                }
-            }
+        if config.try_push(&branch, &remote)? {
+            return Ok(());
         }
     }
 
-    Err(miette!(
-        "Failed to push to all remotes:\n{}",
-        format_bulleted_list(&remotes)
-    ))
+    // Try rest of remotes (not listed on CLI or in config file or `origin`).
+    // TODO: Kind of weird to do this alphabetically? Not sure how Git sorts them though...
+    for remote in remotes {
+        if config.try_push(&branch, &remote)? {
+            return Ok(());
+        }
+    }
+
+    Err(miette!("Failed to upstream {branch} to any remote"))
 }
