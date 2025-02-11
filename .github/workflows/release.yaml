@@ -143,7 +143,7 @@ jobs:
         uses: actions/upload-artifact@v4
         if: runner.os == 'Linux'
         with:
-          name: macos
+          name: linux
           path: |
             target/release/git-upstream-x86_64-linux
             target/release/git-upstream-aarch64-linux
@@ -186,7 +186,7 @@ jobs:
         #         path: target/release/ghciwatch-aarch64-linux
         #
         # will be downloaded to `linux/ghciwatch-aarch64-linux`.
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
 
       - name: Create release
         id: create_release
@@ -199,7 +199,8 @@ jobs:
           generate_release_notes: true
           tag_name: v${{ needs.version.outputs.version }}
           files: |
-            documentation/*
+            linux/*
+            macos/*
 
       - name: Comment on PR with link to the release
         uses: peter-evans/create-or-update-comment@v3
