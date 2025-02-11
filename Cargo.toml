@@ -1,6 +1,6 @@
 [package]
 name = "git-upstream"
-version = "1.4.0"
+version = "1.5.0"
 edition = "2021"
 authors = ["Rebecca Turner <rbt@sent.as>"]
 description = "A shortcut for `git push --set-upstream REMOTE BRANCH`"
