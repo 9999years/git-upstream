@@ -108,7 +108,7 @@ impl Config {
     pub fn try_push(&self, branch: &str, remote: &str) -> miette::Result<bool> {
         tracing::info!(
             "{}",
-            format!("$ git push --set-upstream {branch} {remote}").if_supports_color(
+            format!("$ git push --set-upstream {remote} {branch}").if_supports_color(
                 owo_colors::Stream::Stderr,
                 |text| Style::new().bold().underline().style(text)
             )
