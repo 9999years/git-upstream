@@ -4,6 +4,7 @@ use std::process::Command;
 use clap::Parser;
 use command_error::CommandExt;
 use command_error::OutputContext;
+use command_error::Utf8ProgramAndArgs;
 use fs_err as fs;
 use miette::miette;
 use miette::Context;
@@ -106,17 +107,25 @@ impl Config {
     ///
     /// If successful, returns `true`.
     pub fn try_push(&self, branch: &str, remote: &str) -> miette::Result<bool> {
+        let mut command = Command::new("git");
+        command.args(["push", "--set-upstream", remote, branch]);
+        if self.cli.force {
+            command.arg("--force-with-lease");
+        } else if self.cli.force_unchecked {
+            command.arg("--force");
+        }
+        command.args(&self.cli.git_push_args);
+
+        let command_display = Utf8ProgramAndArgs::from(&command);
+
         tracing::info!(
             "{}",
-            format!("$ git push --set-upstream {remote} {branch}").if_supports_color(
-                owo_colors::Stream::Stderr,
-                |text| Style::new().bold().underline().style(text)
-            )
+            format!("{command_display}").if_supports_color(owo_colors::Stream::Stderr, |text| {
+                Style::new().bold().underline().style(text)
+            })
         );
 
-        let result = Command::new("git")
-            .args(["push", "--set-upstream", remote, branch])
-            .status_checked();
+        let result = command.status_checked();
 
         match result {
             Ok(_) => Ok(true),
@@ -163,6 +172,14 @@ pub struct Cli {
     #[arg(long)]
     fail_fast: bool,
 
+    /// Push with `--force-with-lease`.
+    #[arg(short, long, alias = "force-with-lease")]
+    force: bool,
+
+    /// Push with `--force`.
+    #[arg(long)]
+    force_unchecked: bool,
+
     /// The branch to push. Defaults to the current branch.
     #[arg(long)]
     branch: Option<String>,
@@ -171,6 +188,10 @@ pub struct Cli {
     /// set in the configuration file.
     #[arg(env = "GIT_UPSTREAM_REMOTE")]
     remote: Option<String>,
+
+    /// Extra arguments to pass to `git push`.
+    #[arg(last = true)]
+    git_push_args: Vec<String>,
 }
 
 fn main() -> miette::Result<()> {
