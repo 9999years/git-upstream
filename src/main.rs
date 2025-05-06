@@ -114,6 +114,9 @@ impl Config {
         } else if self.cli.force_unchecked {
             command.arg("--force");
         }
+        if self.cli.no_verify {
+            command.arg("--no-verify");
+        }
         command.args(&self.cli.git_push_args);
 
         let command_display = Utf8ProgramAndArgs::from(&command);
@@ -179,6 +182,10 @@ pub struct Cli {
     /// Push with `--force`.
     #[arg(long)]
     force_unchecked: bool,
+
+    /// Skip pre-push hook.
+    #[arg(long)]
+    no_verify: bool,
 
     /// The branch to push. Defaults to the current branch.
     #[arg(long)]
